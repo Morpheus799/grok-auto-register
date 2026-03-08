@@ -129,7 +129,8 @@ def restart_chrome_process(port=9222, user_data_dir=None):
         "--no-default-browser-check",
         '--lang=en-US',                    
         '--accept-lang=en-US,en',         
-        '--disable-translate'
+        '--disable-translate',
+        '--start-minimized'
     ]
 
     try:
