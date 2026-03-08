@@ -125,12 +125,15 @@ def restart_chrome_process(port=9222, user_data_dir=None):
         "--disable-dev-shm-usage",
         "--disable-software-rasterizer",
         "--window-size=500,800",
+        "--window-position=-3000,-3000",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-popup-blocking", 
         "--no-first-run",
         "--no-default-browser-check",
-        '--lang=en-US',                    
-        '--accept-lang=en-US,en',         
+        '--lang=en-US',
+        '--accept-lang=en-US,en',
         '--disable-translate',
-        '--start-minimized'
     ]
 
     try:
