@@ -127,6 +127,9 @@ def restart_chrome_process(port=9222, user_data_dir=None):
         "--window-size=500,800",
         "--no-first-run",
         "--no-default-browser-check",
+        '--lang=en-US',                    
+        '--accept-lang=en-US,en',         
+        '--disable-translate'
     ]
 
     try:
