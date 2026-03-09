@@ -28,6 +28,12 @@ grok_debug/
 *.swp
 *.swo
 
+# Local env and script files
+.env
+.env.*
+!.env_example
+*.bat
+
 # OS
 Thumbs.db
 Desktop.ini
