@@ -116,3 +116,9 @@ def fetch_verification_code(email: str, timeout: int = 180) -> Optional[str]:
 
     print(f"⏰ 超时（共检查 {checks} 次），未收到验证码")
     return None
+
+
+def destroy_test_email(email: str) -> None:
+    """mail.tm 版本占位函数；由主流程统一调用以保持接口一致。"""
+    if email:
+        ACCOUNTS.pop(email, None)

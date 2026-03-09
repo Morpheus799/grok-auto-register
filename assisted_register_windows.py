@@ -1,8 +1,10 @@
 import time
+import asyncio
 import re
 import random
 import gc
 import json
+import importlib
 import subprocess
 import os
 import shutil
@@ -14,12 +16,17 @@ from datetime import datetime as dt
 
 from playwright.sync_api import sync_playwright
 
-from email_utils import create_test_email, fetch_verification_code
-
 # ====================== 配置 ======================
 # 绕过系统代理（防止连接本地 CDP 时走代理）
 os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 os.environ["no_proxy"] = "localhost,127.0.0.1"
+
+# 静默 Node 驱动层的 DeprecationWarning（仅弃用警告，不影响其他警告）
+node_options = os.environ.get("NODE_OPTIONS", "")
+node_flags = [f for f in node_options.split() if f != "--trace-deprecation"]
+if "--no-deprecation" not in node_flags:
+    node_flags.append("--no-deprecation")
+os.environ["NODE_OPTIONS"] = " ".join(node_flags).strip()
 
 file_lock = threading.Lock()
 timestamp = dt.now().strftime("%m%d%H%M")
@@ -38,6 +45,52 @@ first_names = ["James", "John", "Robert", "Michael", "William",
                "David", "Richard", "Joseph", "Thomas", "Charles"]
 last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones",
               "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
+
+
+# 邮件服务函数引用（默认 mail.tm）
+create_test_email = None
+fetch_verification_code = None
+destroy_test_email = lambda _email: None
+EMAIL_SERVICE_LABEL = "mail.tm"
+
+
+def configure_email_service(choice: str = "1") -> bool:
+    """根据用户选择加载邮件服务实现。"""
+    global create_test_email, fetch_verification_code, destroy_test_email, EMAIL_SERVICE_LABEL
+
+    module_name = "email_utils"
+    EMAIL_SERVICE_LABEL = "mail.tm"
+    if choice == "2":
+        module_name = "email_utils_freemail"
+        EMAIL_SERVICE_LABEL = "Freemail(自建服务)"
+
+    try:
+        email_module = importlib.import_module(module_name)
+        create_test_email = email_module.create_test_email
+        fetch_verification_code = email_module.fetch_verification_code
+        destroy_test_email = getattr(email_module, "destroy_test_email", lambda _email: None)
+        return True
+    except Exception as e:
+        print(f"  ⚠ 加载邮件服务失败: {module_name} - {e}")
+
+        # 仅在选择 Freemail 失败时回退到 mail.tm
+        if module_name != "email_utils":
+            try:
+                email_module = importlib.import_module("email_utils")
+                create_test_email = email_module.create_test_email
+                fetch_verification_code = email_module.fetch_verification_code
+                destroy_test_email = getattr(email_module, "destroy_test_email", lambda _email: None)
+                EMAIL_SERVICE_LABEL = "mail.tm"
+                print("  ⚠ 已回退到 mail.tm")
+                return True
+            except Exception as fallback_err:
+                print(f"  ❌ 回退 mail.tm 失败: {fallback_err}")
+
+        return False
+
+
+# 默认加载 mail.tm，保持直接运行/调用时兼容
+configure_email_service("1")
 
 
 # ====================== 工具函数 ======================
@@ -176,6 +229,10 @@ def run_job(thread_id, task_id, timeout_sec=120):
 
     chrome_process = None
     browser = None
+    context = None
+    page = None
+    listener_attached = False
+    mailbox_email = ""
 
     try:
         # ---- 启动 Chrome ----
@@ -212,11 +269,16 @@ def run_job(thread_id, task_id, timeout_sec=120):
 
             # ---- SSO Cookie 监听 ----
             def handle_response(response):
+                if state["sso_found"]:
+                    return
                 try:
-                    if state["sso_found"]:
+                    if page and page.is_closed():
                         return
                     try:
                         headers = response.all_headers()
+                    except asyncio.CancelledError:
+                        # 连接关闭时 response 查询可能被取消，忽略即可
+                        return
                     except Exception:
                         # 浏览器关闭时可能触发 TargetClosedError，忽略即可
                         return
@@ -230,10 +292,13 @@ def run_job(thread_id, task_id, timeout_sec=120):
                                 state["sso_rw"] = sso_rw_match.group(1)
                             state["sso_found"] = True
                             log(f"[Response监听] 捕获 SSO cookie (sso-rw={'有' if state['sso_rw'] else '无'})")
+                except asyncio.CancelledError:
+                    return
                 except Exception:
                     pass
 
             page.on("response", handle_response)
+            listener_attached = True
 
             # ---- 步骤 1: 创建邮箱 ----
             if time.time() - job_start_time > timeout_sec:
@@ -245,6 +310,7 @@ def run_job(thread_id, task_id, timeout_sec=120):
                     log("[步骤1] 邮箱创建失败 (返回空)")
                     return False
                 state["email"] = email_address
+                mailbox_email = email_address
                 log(f"[步骤1] 邮箱: {email_address}")
             except Exception as e:
                 log(f"[步骤1] 创建邮箱异常: {e}")
@@ -494,8 +560,22 @@ def run_job(thread_id, task_id, timeout_sec=120):
         return False
     finally:
         try:
+            if mailbox_email:
+                destroy_test_email(mailbox_email)
+        except Exception as e:
+            log(f"[清理] 销毁邮箱异常: {e}")
+        try:
+            if listener_attached and page and (not page.is_closed()):
+                page.remove_listener("response", handle_response)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        try:
             if browser:
                 browser.close()
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
         try:
@@ -560,6 +640,19 @@ def main():
         print("  ⚠ 未检测到 Chrome/Edge，请先安装!")
         print("  下载地址: https://www.google.com/chrome/")
         return
+
+    print("\n请选择邮件服务:")
+    print("  1) mail.tm（公共临时邮箱，默认）")
+    print("  2) Freemail（自建 Worker 服务）")
+    email_choice = input("输入 1 或 2 [默认 1]: ").strip()
+    if email_choice not in ("1", "2"):
+        email_choice = "1"
+
+    if not configure_email_service(email_choice):
+        print("  ❌ 邮件服务初始化失败，程序退出")
+        return
+
+    print(f"  已选择邮件服务: {EMAIL_SERVICE_LABEL}")
 
     try:
         total_count = int(input("每个线程要注册的次数: "))
